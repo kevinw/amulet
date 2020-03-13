@@ -86,10 +86,13 @@ static bool handle_events(lua_State *L);
 static am_key convert_key_scancode(SDL_Scancode key);
 static am_mouse_button convert_mouse_button(Uint8 button);
 static bool check_for_package();
+static bool open_package_file(const char* filename);
 static win_info *win_from_id(Uint32 winid);
 
 static am_controller_button convert_controller_button(Uint8 button);
 static am_controller_axis convert_controller_axis(Uint8 axis);
+
+static char* restarting_with_package_filename = NULL;
 
 am_native_window *am_create_native_window(
     am_window_mode mode,
@@ -368,6 +371,51 @@ double am_get_current_time() {
     return ((double)SDL_GetTicks())/1000.0;
 }
 
+double lastRestartTime = -1000.0;
+int am_restart_with_data_pak(lua_State* L) {
+    // check that we aren't in a restart loop. TODO: find a more reliable way to
+    // prevent an app from calling this repeatedly
+    double now = am_get_current_time();
+    double diff = now - lastRestartTime;
+    if (diff < 2.0) {
+        fprintf(stderr, "restarting too soon: %f\n", diff);
+        return 0;
+    } 
+    lastRestartTime = now;
+
+    am_check_nargs(L, 1);
+
+    const char *str = luaL_checkstring(L, 1);
+    if (str == NULL) return luaL_error(L, "must pass a url string argument");
+
+#ifdef __APPLE__
+    NSURLSessionDownloadTask *downloadTask = [[NSURLSession sharedSession]
+    	downloadTaskWithURL:[NSURL URLWithString: @(str)]
+        completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+            if (error) {
+                NSLog(@"download error => %@ ", [error localizedDescription] );
+                return;
+            }
+
+            NSString *tempFile = [NSTemporaryDirectory() stringByAppendingPathComponent:@"replacement.data.pak"];
+            [[NSData dataWithContentsOfURL:location] writeToFile:tempFile atomically:YES];
+            restarting_with_package_filename = strdup([tempFile UTF8String]);
+            printf("new data.pak downloaded (%lld bytes) %s\n", [response expectedContentLength], restarting_with_package_filename);
+        }
+    ];
+    
+    printf("downloading %s\n", str);
+    [downloadTask resume];
+
+#else
+#error "todo: implement"
+#endif
+
+
+
+    return 0;
+}
+
 #define ERR_MSG_SZ 1024
 
 char *am_get_base_path() {
@@ -528,6 +576,14 @@ int main( int argc, char *argv[] )
     }
 
 restart:
+    if (restarting_with_package_filename) {
+        const char* pkg_filename = restarting_with_package_filename;
+        restarting_with_package_filename = NULL;
+        bool result = open_package_file(pkg_filename);
+        free(restarting_with_package_filename);
+        restarting_with_package_filename = NULL;
+    }
+
     eng = am_init_engine(false, argc, argv);
     if (eng == NULL) {
         exit_status = EXIT_FAILURE;
@@ -1419,23 +1475,30 @@ static int rumble(lua_State *L) {
     return 0;
 }
 
+static bool open_package_file(const char* package_filename) {
+    if (am_file_exists(package_filename)) {
+        char *errmsg;
+        if (package != NULL) am_close_package(package);
+        package = am_open_package(package_filename, &errmsg);
+        if (package == NULL) {
+            am_log0("%s", errmsg);
+            free(errmsg);
+            return false;
+        }
+    } else {
+        fprintf(stderr, "WARNING: package file doesn't exist: %s\n", package_filename);
+    }
+    return true;
+}
+
 static bool check_for_package() {
     if (am_opt_main_module != NULL) {
         return true;
     }
     char *package_filename = am_format("%s%c%s", am_opt_data_dir, AM_PATH_SEP, "data.pak");
-    if (am_file_exists(package_filename)) {
-        char *errmsg;
-        package = am_open_package(package_filename, &errmsg);
-        if (package == NULL) {
-            am_log0("%s", errmsg);
-            free(errmsg);
-            free(package_filename);
-            return false;
-        }
-    }
+    bool result = open_package_file(package_filename);
     free(package_filename);
-    return true;
+    return result;
 }
 
 static win_info *win_from_id(Uint32 winid) {

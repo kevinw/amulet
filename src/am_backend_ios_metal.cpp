@@ -67,11 +67,14 @@ static bool ios_was_icloud_update = false;
 
 extern MTKView *am_metal_ios_view;
 
+static char* restarting_with_package_filename = NULL;
+
 //static void init_gamecenter();
 
 #define MIN_UPDATE_TIME (1.0/400.0)
 
 static void ios_sync_store();
+static void ios_restart();
 
 //---------------------------------------------------------------------------
 
@@ -287,20 +290,26 @@ static void set_audio_category() {
     [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient error:nil];
 }
 
-static bool open_package() {
-    char *package_filename = am_format("%s/%s", am_opt_data_dir, "data.pak");
+static bool open_package_file(const char* package_filename) {
     if (am_file_exists(package_filename)) {
         char *errmsg;
         package = am_open_package(package_filename, &errmsg);
         if (package == NULL) {
             am_log0("%s", errmsg);
             free(errmsg);
-            free(package_filename);
             return false;
         }
+    } else {
+        fprintf(stderr, "WARNING: package file doesn't exist: %s\n", package_filename);
     }
-    free(package_filename);
     return true;
+}
+
+static bool open_package() {
+    char *package_filename = am_format("%s/%s", am_opt_data_dir, "data.pak");
+    bool retVal = open_package_file(package_filename);
+    free(package_filename);
+    return retVal;
 }
 
 static OSStatus
@@ -441,14 +450,65 @@ static void ios_init_audio() {
     }
 }
 
+double lastRestartTime = -1000.0;
+
+int am_restart_with_data_pak(lua_State *L) {
+    // check that we aren't in a restart loop. TODO: find a more reliable way to
+    // prevent an app from calling this repeatedly
+    double now = am_get_current_time();
+    double diff = now - lastRestartTime;
+    if (diff < 2.0) {
+        fprintf(stderr, "restarting too soon: %f\n", diff);
+        return 0;
+    } 
+    lastRestartTime = now;
+
+    am_check_nargs(L, 1);
+
+    const char *str = luaL_checkstring(L, 1);
+    if (str == NULL) return luaL_error(L, "must pass a url string argument");
+
+    NSURLSessionDownloadTask *downloadTask = [[NSURLSession sharedSession]
+    	downloadTaskWithURL:[NSURL URLWithString: @(str)]
+        completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+            if (error) {
+                NSLog(@"download error => %@ ", [error localizedDescription] );
+                return;
+            }
+
+            NSString *tempFile = [NSTemporaryDirectory() stringByAppendingPathComponent:@"replacement.data.pak"];
+            [[NSData dataWithContentsOfURL:location] writeToFile:tempFile atomically:YES];
+            restarting_with_package_filename = strdup([tempFile UTF8String]);
+            printf("new data.pak downloaded (%lld bytes) %s\n", [response expectedContentLength], restarting_with_package_filename);
+        }
+    ];
+    
+    printf("downloading %s\n", str);
+    [downloadTask resume];
+    
+    return 0;
+}
+
 static void ios_init_engine() {
     ios_running = false;
     ios_paused = false;
 
     am_opt_data_dir = ios_bundle_path();
     am_opt_main_module = "main";
-    if (!ios_performing_restart) {
-        if (!open_package()) return;
+    bool didLoadFromPackageURL = false;
+    if (!ios_performing_restart || restarting_with_package_filename != NULL) {
+        if (restarting_with_package_filename != NULL) {
+            const char* pkg_filename = restarting_with_package_filename;
+            restarting_with_package_filename = NULL;
+            if (package != NULL) am_close_package(package);
+            bool result = open_package_file(pkg_filename);
+            free(restarting_with_package_filename);
+            restarting_with_package_filename = NULL;
+            if (!result) return;
+            didLoadFromPackageURL = true;
+        } else {
+            if (!open_package()) return;
+        }
         if (!am_load_config()) return;
     }
     ios_eng = am_init_engine(false, 0, NULL);
@@ -460,7 +520,7 @@ static void ios_init_engine() {
     if (am_call(ios_eng->L, 1, 0)) {
         ios_running = true;
     }
-    if (!ios_performing_restart) {
+    if (!ios_performing_restart && !didLoadFromPackageURL) {
         am_gl_end_framebuffer_render();
         am_gl_end_frame(false);
     }
@@ -481,6 +541,7 @@ static void ios_teardown() {
         }
         if (package != NULL) {
             am_close_package(package);
+            package = NULL;
         }
     }
 }
@@ -894,6 +955,7 @@ extern void am_ios_custom_init(UIViewController *view_controller);
         ios_draw();
         am_gl_end_frame(true);
         ios_done_first_draw = true;
+        if (restarting_with_package_filename) ios_restart();
     }
 }
 

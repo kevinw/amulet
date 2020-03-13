@@ -9,6 +9,7 @@ static void set_arg_global(lua_State *L, int argc, char** argv);
 static void am_set_version(lua_State *L);
 static void am_set_dirs(lua_State *L);
 static void am_set_platform(lua_State *L);
+static void am_set_restart_func(lua_State *L);
 static void am_set_platform_ptrsize(lua_State *L);
 static void am_set_support_email(lua_State *L);
 
@@ -84,6 +85,7 @@ am_engine *am_init_engine(bool worker, int argc, char** argv) {
     am_set_platform(L);
     am_set_platform_ptrsize(L);
     am_set_support_email(L);
+    am_set_restart_func(L);
     if (!run_embedded_scripts(L, worker)) {
         lua_close(L);
         return NULL;
@@ -210,6 +212,19 @@ static void am_set_dirs(lua_State *L) {
     lua_pop(L, 1); // am table
     free(data_dir);
     free(base_dir);
+}
+
+int am_restart_with_data_pak(lua_State *L);
+
+static void am_set_restart_func(lua_State *L) {
+    // provide the "am.restart_with_data_pak" function for
+    // reloading the lua state from a url
+    lua_getglobal(L, AMULET_LUA_MODULE_NAME);
+    lua_pushcclosure(L, am_restart_with_data_pak, 0);
+    lua_setfield(L, -2, "restart_with_data_pak");
+    am_log0("%s", "added am.restart_with_data_pak");
+    lua_pop(L, 1); // am table
+
 }
 
 static void am_set_platform(lua_State *L) {
