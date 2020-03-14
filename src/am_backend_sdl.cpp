@@ -414,7 +414,7 @@ int am_restart_with_data_pak(lua_State* L) {
         }
     ];
     
-    printf("downloading %s\n", str);
+    printf("downloading %s\n", urlstr);
     [downloadTask resume];
 
 #else
