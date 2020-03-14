@@ -2,6 +2,14 @@
 
 #ifdef AM_BACKEND_SDL
 
+#ifndef __APPLE__
+#include <windows.h>
+#undef FAR // TODO: why
+#define FAR
+#include <Wininet.h>
+#endif
+
+
 #define SDL_MAIN_HANDLED 1
 #include "SDL.h"
 #include "SDL_syswm.h"
@@ -40,6 +48,7 @@ struct controller_info {
     SDL_Haptic *haptic;
     SDL_GameController *controller;
 };
+
 
 #define MAX_CONTROLLERS 8
 
@@ -372,6 +381,7 @@ double am_get_current_time() {
 }
 
 double lastRestartTime = -1000.0;
+
 int am_restart_with_data_pak(lua_State* L) {
     // check that we aren't in a restart loop. TODO: find a more reliable way to
     // prevent an app from calling this repeatedly
@@ -385,12 +395,12 @@ int am_restart_with_data_pak(lua_State* L) {
 
     am_check_nargs(L, 1);
 
-    const char *str = luaL_checkstring(L, 1);
-    if (str == NULL) return luaL_error(L, "must pass a url string argument");
+    const char *urlstr = luaL_checkstring(L, 1);
+    if (urlstr == NULL) return luaL_error(L, "must pass a url string argument");
 
 #ifdef __APPLE__
     NSURLSessionDownloadTask *downloadTask = [[NSURLSession sharedSession]
-    	downloadTaskWithURL:[NSURL URLWithString: @(str)]
+    	downloadTaskWithURL:[NSURL URLWithString: @(urlstr)]
         completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
             if (error) {
                 NSLog(@"download error => %@ ", [error localizedDescription] );
@@ -408,10 +418,61 @@ int am_restart_with_data_pak(lua_State* L) {
     [downloadTask resume];
 
 #else
-#error "todo: implement"
+    HINTERNET session = InternetOpenA("amulet", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    HANDLE file = InternetOpenUrlA(session, urlstr, NULL, 0L, 0, 0);
+    if (!file) {
+		printf("Unable to open request. Error %ld\n", GetLastError());
+        return luaL_error(L, "Unable to open request.");
+    }
+
+	const size_t BUFFER_SIZE = 1024 * 500;
+    static char buffer[BUFFER_SIZE + 1];
+
+    DWORD totalBytesRead = 0;
+    char* bufPtr = &buffer[0];
+	while (true) {
+		DWORD bytesRead;
+		BOOL read = InternetReadFile(file, bufPtr, BUFFER_SIZE - totalBytesRead, &bytesRead);
+		if (bytesRead == 0) break;
+
+		if (!read) {
+			fprintf(stderr, "InternetReadFile error : <%lu>\n", GetLastError());
+            break;
+		} else {
+            totalBytesRead += bytesRead;
+            assert(totalBytesRead <= BUFFER_SIZE);
+
+			buffer[bytesRead] = 0;
+			printf("Retrieved %lu data bytes: %s\n", bytesRead, buffer);
+		}
+	}
+
+    char path[MAX_PATH];
+    if (0 == GetTempPathA(MAX_PATH, path))
+        return luaL_error(L, "Could not obtain a temporary path.");
+
+    char filename[MAX_PATH];
+    if (0 == GetTempFileNameA(path, "pak", 0, filename))
+        return luaL_error(L, "Could not create a temporary filename.");
+
+    HANDLE tempFileHandle = CreateFileA(filename, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (tempFileHandle == INVALID_HANDLE_VALUE)
+        return luaL_error(L, "Could not open a temporary file handle.");
+
+    DWORD bytesWritten;
+    if (!WriteFile(tempFileHandle, buffer, totalBytesRead, &bytesWritten, NULL))
+        return luaL_error(L, "Could not write to a temporary file.");
+
+    assert(bytesWritten == bytesRead);
+    CloseHandle(tempFileHandle);
+
+    restarting_with_package_filename = strdup(filename);
+    restart_triggered = true;
+
+    InternetCloseHandle(file);
+    InternetCloseHandle(connect);
+    InternetCloseHandle(session);
 #endif
-
-
 
     return 0;
 }

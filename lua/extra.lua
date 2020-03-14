@@ -345,7 +345,7 @@ function log(fmt, ...)
     -- write to log file if on desktop system
     local plat = am.platform
     if plat == "windows" or plat == "linux" or plat == "osx" then
-        local f = io.open(am.app_data_dir.."log.txt", first_log and "w" or "a")
+        local f = assert(io.open(am.app_data_dir.."log.txt", first_log and "w" or "a"))
         f:write(msg)
         f:write("\n")
         f:close()
